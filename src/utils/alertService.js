@@ -3,8 +3,9 @@
 //   ADMIN_EMAIL=you@gmail.com
 //   GMAIL_USER=yourbot@gmail.com
 //   GMAIL_APP_PASSWORD=xxxx xxxx   (Gmail App Password, not login password)
-//   ADMIN_PHONE=923001234567        (optional, for WhatsApp DM when session is alive)
+//   ADMIN_PHONE=923001234567        (optional, WhatsApp DM when session alive)
 
+const dns    = require('dns').promises;
 const logger = require('./logger');
 
 const lastSent = {};
@@ -15,6 +16,15 @@ function canSend(type) {
   if (lastSent[type] && now - lastSent[type] < COOLDOWN) return false;
   lastSent[type] = now;
   return true;
+}
+
+// Resolve smtp.gmail.com to IPv4 explicitly — Railway can't reach Gmail over IPv6
+async function resolveIPv4(hostname) {
+  try {
+    const results = await dns.resolve4(hostname);
+    if (results && results.length) return results[0];
+  } catch (_) {}
+  return hostname; // fallback to hostname if DNS fails
 }
 
 async function sendEmail(subject, body) {
@@ -28,17 +38,20 @@ async function sendEmail(subject, body) {
   }
 
   try {
-    const nodemailer  = require('nodemailer');
+    const nodemailer = require('nodemailer');
+    const ipv4       = await resolveIPv4('smtp.gmail.com');
+    logger.info(`[Alert] Connecting to Gmail SMTP at ${ipv4}:587`);
 
-    // Port 465 (SSL) is blocked by Railway — use 587 (STARTTLS) instead
     const transporter = nodemailer.createTransport({
-      host:   'smtp.gmail.com',
+      host:   ipv4,          // IPv4 address directly — bypasses IPv6 resolution
       port:   587,
       secure: false,
       requireTLS: true,
       auth:   { user, pass },
-      tls:    { rejectUnauthorized: false },
-      family: 4  // force IPv4 — Railway can't reach Gmail over IPv6
+      tls: {
+        servername:          'smtp.gmail.com', // SNI still uses hostname for cert check
+        rejectUnauthorized:  false
+      }
     });
 
     await transporter.sendMail({
@@ -51,7 +64,7 @@ async function sendEmail(subject, body) {
     logger.info(`[Alert] Email sent → ${to} | ${subject}`);
     return true;
   } catch (err) {
-    logger.error(`[Alert] Email failed (${err.code || err.message}): ${err.message}`);
+    logger.error(`[Alert] Email failed (${err.code || 'ERR'}): ${err.message}`);
     return false;
   }
 }
@@ -74,16 +87,10 @@ async function sendWhatsAppDM(text) {
 
 async function dispatch(type, subject, message, emailOnly = false) {
   logger.info(`[Alert] Dispatching "${type}"...`);
-
-  if (!canSend(type)) {
-    logger.info(`[Alert] "${type}" suppressed (10min cooldown active).`);
-    return;
-  }
+  if (!canSend(type)) { logger.info(`[Alert] "${type}" suppressed (cooldown).`); return; }
 
   const waText = `🤖 *CMS Bot Alert*\n\n${message}\n\n⏰ ${new Date().toISOString()}`;
-
   if (!emailOnly) await sendWhatsAppDM(waText);
-
   await sendEmail(subject, message);
 }
 
@@ -91,33 +98,27 @@ module.exports = {
   whatsappDisconnected: (reason) =>
     dispatch('wa_disconnected', 'WhatsApp Session Disconnected',
       `WhatsApp session disconnected.\n\nReason: ${reason}\n\nOpen /qr to re-authenticate:\nhttps://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000'}/qr`,
-      true
-    ),
+      true),
 
   whatsappAuthFailed: (msg) =>
     dispatch('wa_auth_fail', 'WhatsApp Auth Failed',
       `WhatsApp auth failed.\n\nError: ${msg}\n\nOpen /qr to re-scan:\nhttps://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000'}/qr`,
-      true
-    ),
+      true),
 
   qrRequired: () =>
     dispatch('qr_required', 'WhatsApp QR Scan Required',
       `WhatsApp session not found — QR scan needed.\n\nOpen /qr to link WhatsApp:\nhttps://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:3000'}/qr`,
-      true
-    ),
+      true),
 
   cmsLoginFailed: (err) =>
     dispatch('cms_login', 'CMS Login Failed',
-      `CMS login failed.\n\nError: ${err}\n\nCheck CMS_ENROLLMENT and CMS_PASSWORD env vars.`
-    ),
+      `CMS login failed.\n\nError: ${err}\n\nCheck CMS_ENROLLMENT and CMS_PASSWORD env vars.`),
 
   scrapeFailed: (err) =>
     dispatch('scrape_fail', 'CMS Scrape Failed',
-      `CMS scrape failed.\n\nError: ${err}`
-    ),
+      `CMS scrape failed.\n\nError: ${err}`),
 
   sendFailed: (type) =>
     dispatch('send_fail', `WhatsApp Group Send Failed (${type})`,
-      `Failed to deliver ${type} notification to the group after all retries.\n\nStudents did NOT receive this message.`
-    ),
+      `Failed to deliver ${type} notification to the group after all retries.\n\nStudents did NOT receive this message.`),
 };
