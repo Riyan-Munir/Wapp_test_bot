@@ -1,11 +1,17 @@
 // src/utils/alertService.js
-// Env vars needed:
-//   ADMIN_EMAIL=you@gmail.com
-//   GMAIL_USER=yourbot@gmail.com
-//   GMAIL_APP_PASSWORD=xxxx xxxx   (Gmail App Password, not login password)
-//   ADMIN_PHONE=923001234567        (optional, WhatsApp DM when session alive)
+// Uses Resend API (free, 100 emails/day, works on any host including Railway)
+// No SMTP — pure HTTPS so no port blocking or IP reputation issues.
+//
+// Setup (2 min):
+//   1. Sign up at https://resend.com (free)
+//   2. Go to API Keys → Create API Key → copy it
+//   3. Add to Railway env vars:
+//        RESEND_API_KEY=re_xxxxxxxx
+//        ADMIN_EMAIL=you@gmail.com
+//   Optional (WhatsApp DM for non-session alerts):
+//        ADMIN_PHONE=923001234567
 
-const dns    = require('dns').promises;
+const https  = require('https');
 const logger = require('./logger');
 
 const lastSent = {};
@@ -18,55 +24,52 @@ function canSend(type) {
   return true;
 }
 
-// Resolve smtp.gmail.com to IPv4 explicitly — Railway can't reach Gmail over IPv6
-async function resolveIPv4(hostname) {
-  try {
-    const results = await dns.resolve4(hostname);
-    if (results && results.length) return results[0];
-  } catch (_) {}
-  return hostname; // fallback to hostname if DNS fails
-}
+function sendEmail(subject, body) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const to     = process.env.ADMIN_EMAIL;
 
-async function sendEmail(subject, body) {
-  const user = process.env.GMAIL_USER;
-  const pass = process.env.GMAIL_APP_PASSWORD;
-  const to   = process.env.ADMIN_EMAIL;
-
-  if (!user || !pass || !to) {
-    logger.warn('[Alert] Email skipped — GMAIL_USER / GMAIL_APP_PASSWORD / ADMIN_EMAIL not set.');
-    return false;
+  if (!apiKey || !to) {
+    logger.warn('[Alert] Email skipped — RESEND_API_KEY or ADMIN_EMAIL not set.');
+    return Promise.resolve(false);
   }
 
-  try {
-    const nodemailer = require('nodemailer');
-    const ipv4       = await resolveIPv4('smtp.gmail.com');
-    logger.info(`[Alert] Connecting to Gmail SMTP at ${ipv4}:587`);
+  const payload = JSON.stringify({
+    from:    'CMS Bot <onboarding@resend.dev>',
+    to:      [to],
+    subject: `CMS Bot: ${subject}`,
+    text:    `${body}\n\nTime: ${new Date().toISOString()}\nServer: ${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost'}`
+  });
 
-    const transporter = nodemailer.createTransport({
-      host:   ipv4,          // IPv4 address directly — bypasses IPv6 resolution
-      port:   587,
-      secure: false,
-      requireTLS: true,
-      auth:   { user, pass },
-      tls: {
-        servername:          'smtp.gmail.com', // SNI still uses hostname for cert check
-        rejectUnauthorized:  false
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'api.resend.com',
+      path:     '/emails',
+      method:   'POST',
+      headers:  {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type':  'application/json',
+        'Content-Length': Buffer.byteLength(payload)
       }
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          logger.info(`[Alert] Email sent → ${to} | ${subject}`);
+          resolve(true);
+        } else {
+          logger.error(`[Alert] Email failed — HTTP ${res.statusCode}: ${data}`);
+          resolve(false);
+        }
+      });
     });
-
-    await transporter.sendMail({
-      from:    `"CMS Bot" <${user}>`,
-      to,
-      subject: `CMS Bot: ${subject}`,
-      text:    `${body}\n\nTime: ${new Date().toISOString()}\nServer: ${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost'}`
+    req.on('error', (err) => {
+      logger.error(`[Alert] Email request failed: ${err.message}`);
+      resolve(false);
     });
-
-    logger.info(`[Alert] Email sent → ${to} | ${subject}`);
-    return true;
-  } catch (err) {
-    logger.error(`[Alert] Email failed (${err.code || 'ERR'}): ${err.message}`);
-    return false;
-  }
+    req.write(payload);
+    req.end();
+  });
 }
 
 async function sendWhatsAppDM(text) {
