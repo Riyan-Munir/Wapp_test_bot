@@ -6,7 +6,7 @@ const messages         = require('../whatsapp/messages');
 const alerts           = require('../utils/alertService');
 const logger           = require('../utils/logger');
 
-const H48 = 48 * 3600000;
+const H48 = 72 * 3600000;
 const H6  =  6 * 3600000;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
