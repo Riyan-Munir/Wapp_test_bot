@@ -34,10 +34,11 @@ async function sendEmail(subject, body) {
     const transporter = nodemailer.createTransport({
       host:   'smtp.gmail.com',
       port:   587,
-      secure: false,          // STARTTLS — upgrades after connect
-      requireTLS: true,       // reject if server doesn't support TLS
+      secure: false,
+      requireTLS: true,
       auth:   { user, pass },
-      tls:    { rejectUnauthorized: false } // Railway TLS quirks
+      tls:    { rejectUnauthorized: false },
+      family: 4  // force IPv4 — Railway can't reach Gmail over IPv6
     });
 
     await transporter.sendMail({
